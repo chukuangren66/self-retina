@@ -85,34 +85,54 @@ class LPFOnline(nn.Module):
         self.past_inputs = torch.roll(self.past_inputs, -shift_amount, -1)
         self.past_inputs[..., -shift_amount:] = assign
 
-    def reset_past(self, shape=None):
+    def reset_past(self, shape=None, device=None, dtype=None):
         shape = shape or self.past_inputs.shape
-        self.past_inputs = torch.zeros(shape)
+        device = device or self.past_inputs.device
+        dtype = dtype or self.past_inputs.dtype
+        self.past_inputs = torch.zeros(shape, device=device, dtype=dtype)
 
     def forward(self, x, padding_mode="past"):
-        # Expect (N=self.output_dim, ...., T=100)
         original_shape = x.shape
-        x = x.reshape(x.shape[0], -1, x.shape[-1])  
-        self.past_inputs = self.past_inputs.to(x.device)
+        x = x.reshape(x.shape[0], -1, x.shape[-1])  # (B, C, T)
 
-        syn_kernel = torch.exp(-torch.arange(self.kernel_size).to(x.device) / self.tau_syn).unsqueeze(0).unsqueeze(0)
-        mem_kernel = torch.exp(-torch.arange(self.kernel_size).to(x.device) / self.tau_mem).unsqueeze(0).unsqueeze(0)
+        device = x.device
+        dtype = x.dtype
+
+        scale = self.scale_factor.to(device=device, dtype=dtype)
+        tau_syn = self.tau_syn.to(device=device, dtype=dtype)
+        tau_mem = self.tau_mem.to(device=device, dtype=dtype)
+
+        t = torch.arange(self.kernel_size, device=device, dtype=dtype)
+        syn_kernel = torch.exp(-t / tau_syn).unsqueeze(0).unsqueeze(0)   # (1,1,K)
+        mem_kernel = torch.exp(-t / tau_mem).unsqueeze(0).unsqueeze(0)   # (1,1,K)
+
         padding = torch.zeros_like(syn_kernel)
-        syn_kernel = torch.cat((padding, syn_kernel), -1).to(x.device) 
+        syn_kernel = torch.cat((padding, syn_kernel), -1)                # (1,1,2K)
         kernel = torch.nn.functional.conv1d(syn_kernel.flip(-1), mem_kernel.flip(-1))[..., :-1]
         self.pad_size = kernel.shape[-1] - 1
 
-        if (shape := x.shape[:-1]) != self.past_inputs.shape[:-1]:
-            self.reset_past(shape=(*shape, self.pad_size))
+        # past_inputs 永远保持在同 device/dtype
+        if (shape := x.shape[:-1]) != self.past_inputs.shape[:-1] or self.past_inputs.device != device:
+            self.reset_past(shape=(*shape, self.pad_size), device=device, dtype=dtype)
 
-        if padding_mode=="past": 
-            padded = torch.cat((self.past_inputs.to(x.device), x), -1)  
-            pdb.set_trace()
-            convd = torch.nn.functional.conv1d( padded,  kernel.flip(-1).repeat(self.num_channels, 1, 1),
-                                                groups=self.num_channels, 
-                                                bias=None, stride=1, padding=0, dilation=1) * self.scale_factor 
-            self.shift_past_inputs(x.shape[-1], x[..., -self.pad_size:].data)
-            return convd.reshape(*original_shape) 
+        if padding_mode == "past":
+            padded = torch.cat((self.past_inputs, x), -1)
+
+            convd = torch.nn.functional.conv1d(
+                padded,
+                kernel.flip(-1).repeat(self.num_channels, 1, 1),
+                groups=self.num_channels,
+                bias=None,
+                stride=1,
+                padding=0,
+                dilation=1,
+            ) * scale
+
+            # 用 detach，不要用 .data
+            self.shift_past_inputs(x.shape[-1], x[..., -self.pad_size:].detach())
+            return convd.reshape(*original_shape)
+
+        raise NotImplementedError(padding_mode)
   
         # elif padding_mode=="repeat":
         #     padded = torch.cat((x[..., :1].repeat(1, 1, self.pad_size), x), -1) 

@@ -18,6 +18,8 @@ from engine.callbacks.logging import LoggingCallback
 from data.module import EyeTrackingDataModule 
 from data.utils import load_yaml_config
 
+torch.autograd.set_detect_anomaly(True)
+
 seed_everything(1234, workers=True)
 
 load_dotenv()
@@ -29,7 +31,7 @@ paths = {
 
 def launch_fire(
     # generic 
-    num_workers=4,
+    num_workers=8,
     device=0,
     wandb_mode="run",  # ["disabled", "run"]
     project_name="event_eye_tracking",
@@ -114,8 +116,8 @@ def launch_fire(
             if training_params["verify_hardware_compatibility"]:
                 dynapcnn_net = convert_to_dynap(model.spiking_model.cpu(), input_shape=input_shape)
                 dynapcnn_net.make_config(device="speck2fmodule") 
-            example_input = torch.ones(training_params["batch_size"] * dataset_params["num_bins"], *input_shape)
-            model.spiking_model(example_input)  
+            #example_input = torch.ones(training_params["batch_size"] * dataset_params["num_bins"], *input_shape)
+            #model.spiking_model(example_input)  
             
         else:
             macs, params = get_model_complexity_info(model, input_shape)
@@ -159,7 +161,8 @@ def launch_fire(
         devices=[device],
         num_sanity_val_steps=0, 
         callbacks=[logging_callback],
-        logger=wandb_logger)
+        logger=wandb_logger,
+        val_check_interval=0.25)
     
     if path_to_run != None:
         trainer.load(path_to_run) 

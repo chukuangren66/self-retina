@@ -75,10 +75,11 @@ class GaussianLoss(nn.Module):
     def forward(self, y_pred):
         mu = self.threshold
         sigma = 1.0
-
+        import math
+        den = sigma * torch.sqrt(torch.tensor(2.0 * math.pi, device=y_pred.device, dtype=y_pred.dtype) + 1e-8)
         # Compute the probability density function (PDF) of the Gaussian distribution
-        pdf = torch.exp(-0.5 * ((y_pred - mu) / sigma) ** 2) / (
-            sigma * torch.sqrt(2 * torch.tensor(np.pi) + 1e-8)
+        pdf = torch.exp(-0.5 * ((y_pred - mu) / sigma) ** 2) / ( 
+            den
         )
 
         # Compute the loss as the distance from the Gaussian PDF
@@ -165,11 +166,28 @@ class SpeckLoss(nn.Module):
 
         # Limits Simulation Device Mismatch for Multi Firing Kernels 
         last_layer_idx = len(self.layer_stats["spiking"])
-        firing_rates = np.linspace(self.firing_lim[0], self.firing_lim[1], last_layer_idx)
+
+        # 选一个可靠的 device（从 stats 里拿 input 的 device）
+        dev = next(iter(self.layer_stats["spiking"].values()))["input"].device
+        dtype = next(iter(self.layer_stats["spiking"].values()))["input"].dtype
+
+        # 用 torch.linspace 放到同 device
+        firing_rates = torch.linspace(
+            self.firing_lim[0], self.firing_lim[1], last_layer_idx,
+            device=dev, dtype=dtype
+        )
+
+        # 用 torch scalar 初始化累计项（不要用 python 0）
+        self.input_loss = torch.zeros((), device=dev, dtype=dtype)
+        self.fire_loss = torch.zeros((), device=dev, dtype=dtype)
+
         for i, (_, stats) in enumerate(self.layer_stats["spiking"].items()):
             inputs_clipped = torch.nn.functional.relu(stats["input"] - self.spiking_thresholds[i])
-            self.input_loss += torch.sqrt(torch.mean(inputs_clipped**2) + 1e-8)
-            self.fire_loss += (firing_rates[i] - stats["firing_rate"]) ** 2 / firing_rates[i] ** 2
+            self.input_loss = self.input_loss + torch.sqrt(torch.mean(inputs_clipped ** 2) + 1e-8)
+
+            fr = firing_rates[i]
+            self.fire_loss = self.fire_loss + (fr - stats["firing_rate"]) ** 2 / (fr ** 2 + 1e-8)
+
 
         loss = {
             "upper_synops_loss": self.w_synap_loss * upper_synops_loss,
